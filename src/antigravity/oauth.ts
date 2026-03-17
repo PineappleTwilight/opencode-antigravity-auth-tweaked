@@ -12,6 +12,12 @@ import {
 } from "../constants";
 import { createLogger } from "../plugin/logger";
 import { calculateTokenExpiry } from "../plugin/auth";
+import {
+  loadManagedProject,
+  onboardManagedProject,
+  getDefaultTierId,
+  extractManagedProjectId,
+} from "../plugin/project";
 
 const log = createLogger("oauth");
 
@@ -89,7 +95,7 @@ function decodeState(state: string): AntigravityAuthState {
 /**
  * Build the Antigravity OAuth authorization URL including PKCE and optional project metadata.
  */
-export async function authorizeAntigravity(projectId = ""): Promise<AntigravityAuthorization> {
+export async function authorizeAntigravity(): Promise<AntigravityAuthorization> {
   const pkce = (await generatePKCE()) as PkcePair;
 
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -101,7 +107,7 @@ export async function authorizeAntigravity(projectId = ""): Promise<AntigravityA
   url.searchParams.set("code_challenge_method", "S256");
   url.searchParams.set(
     "state",
-    encodeState({ verifier: pkce.verifier, projectId: projectId || "" }),
+    encodeState({ verifier: pkce.verifier, projectId: "" }),
   );
   url.searchParams.set("access_type", "offline");
   url.searchParams.set("prompt", "consent");
@@ -109,7 +115,7 @@ export async function authorizeAntigravity(projectId = ""): Promise<AntigravityA
   return {
     url: url.toString(),
     verifier: pkce.verifier,
-    projectId: projectId || "",
+    projectId: "",
   };
 }
 
@@ -130,68 +136,42 @@ async function fetchWithTimeout(
 }
 
 async function fetchProjectID(accessToken: string): Promise<string> {
-  const errors: string[] = [];
-  const loadHeaders: Record<string, string> = {
-    Authorization: `Bearer ${accessToken}`,
-    "Content-Type": "application/json",
-    "User-Agent": GEMINI_CLI_HEADERS["User-Agent"],
-    "Client-Metadata": getAntigravityHeaders()["Client-Metadata"],
-  };
+  // Environment variable takes highest precedence (matching Gemini CLI)
+  const envProjectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID;
+  if (envProjectId) {
+    log.debug("Using project ID from environment during OAuth", { envProjectId });
+    return envProjectId;
+  }
 
-  const loadEndpoints = Array.from(
-    new Set<string>([...ANTIGRAVITY_LOAD_ENDPOINTS, ...ANTIGRAVITY_ENDPOINT_FALLBACKS]),
-  );
+  try {
+    // Try to resolve a managed project from Antigravity if possible.
+    const loadPayload = await loadManagedProject(accessToken);
+    const resolvedManagedProjectId = extractManagedProjectId(loadPayload);
 
-  for (const baseEndpoint of loadEndpoints) {
-    try {
-      const url = `${baseEndpoint}/v1internal:loadCodeAssist`;
-      const response = await fetchWithTimeout(url, {
-        method: "POST",
-        headers: loadHeaders,
-        body: JSON.stringify({
-          metadata: {
-            ideType: "ANTIGRAVITY",
-            platform: process.platform === "win32" ? "WINDOWS" : "MACOS",
-            pluginType: "GEMINI",
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        const message = await response.text().catch(() => "");
-        errors.push(
-          `loadCodeAssist ${response.status} at ${baseEndpoint}${
-            message ? `: ${message}` : ""
-          }`,
-        );
-        continue;
-      }
-
-      const data = await response.json();
-      if (typeof data.cloudaicompanionProject === "string" && data.cloudaicompanionProject) {
-        return data.cloudaicompanionProject;
-      }
-      if (
-        data.cloudaicompanionProject &&
-        typeof data.cloudaicompanionProject.id === "string" &&
-        data.cloudaicompanionProject.id
-      ) {
-        return data.cloudaicompanionProject.id;
-      }
-
-      errors.push(`loadCodeAssist missing project id at ${baseEndpoint}`);
-    } catch (e) {
-      errors.push(
-        `loadCodeAssist error at ${baseEndpoint}: ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      );
+    if (resolvedManagedProjectId) {
+      log.debug("Resolved managed project via loadCodeAssist", { resolvedManagedProjectId });
+      return resolvedManagedProjectId;
     }
+
+    // No managed project found - try to auto-provision one via onboarding.
+    const tierId = getDefaultTierId(loadPayload?.allowedTiers) ?? "FREE";
+    log.debug("Auto-provisioning managed project", { tierId });
+    
+    const provisionedProjectId = await onboardManagedProject(
+      accessToken,
+      tierId,
+    );
+
+    if (provisionedProjectId) {
+      log.debug("Successfully provisioned managed project", { provisionedProjectId });
+      return provisionedProjectId;
+    }
+
+    log.warn("Failed to provision managed project - account may not work correctly");
+  } catch (error) {
+    log.warn("Error during project discovery/onboarding", { error: String(error) });
   }
 
-  if (errors.length) {
-    log.warn("Failed to resolve Antigravity project via loadCodeAssist", { errors: errors.join("; ") });
-  }
   return "";
 }
 

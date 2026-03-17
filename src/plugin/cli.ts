@@ -9,16 +9,6 @@ import {
 } from "./ui/auth-menu";
 import { updateOpencodeConfig } from "./config/updater";
 
-export async function promptProjectId(): Promise<string> {
-  const rl = createInterface({ input, output });
-  try {
-    const answer = await rl.question("Project ID (leave blank to use your default project): ");
-    return answer.trim();
-  } finally {
-    rl.close();
-  }
-}
-
 export async function promptAddAnotherAccount(currentCount: number): Promise<boolean> {
   const rl = createInterface({ input, output });
   try {

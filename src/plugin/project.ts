@@ -34,12 +34,75 @@ interface LoadCodeAssistPayload {
 }
 
 interface OnboardUserPayload {
+  name?: string;
   done?: boolean;
+  error?: {
+    message: string;
+    code: number;
+    details?: any[];
+  };
   response?: {
     cloudaicompanionProject?: {
       id?: string;
     };
   };
+}
+
+/**
+ * Checks if an error in loadCodeAssist or onboardUser indicates validation is required.
+ */
+function isValidationRequired(data: any): { required: boolean; url?: string; message?: string } {
+  if (data?.error?.details) {
+    for (const detail of data.error.details) {
+      if (detail.reason === "VALIDATION_REQUIRED" || detail.reason === "QUOTA_EXHAUSTED") {
+        return { 
+          required: true, 
+          url: detail.metadata?.validation_url || detail.metadata?.verify_url,
+          message: data.error.message 
+        };
+      }
+    }
+  }
+  return { required: false };
+}
+
+/**
+ * Polls a long-running operation until it is done.
+ */
+async function pollOperation(
+  accessToken: string,
+  baseEndpoint: string,
+  operationName: string,
+  maxAttempts = 12,
+  delayMs = 5000,
+): Promise<OnboardUserPayload | null> {
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    ...getAntigravityHeaders(),
+  };
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const response = await fetch(`${baseEndpoint}/v1/${operationName}`, {
+        headers,
+      });
+
+      if (!response.ok) {
+        log.debug("Operation polling failed", { status: response.status, operationName });
+        break;
+      }
+
+      const payload = (await response.json()) as OnboardUserPayload;
+      if (payload.done) {
+        return payload;
+      }
+    } catch (error) {
+      log.debug("Error polling operation", { error: String(error), operationName });
+      break;
+    }
+    await wait(delayMs);
+  }
+  return null;
 }
 
 function buildMetadata(projectId?: string): Record<string, string> {
@@ -57,7 +120,7 @@ function buildMetadata(projectId?: string): Record<string, string> {
 /**
  * Selects the default tier ID from the allowed tiers list.
  */
-function getDefaultTierId(allowedTiers?: AntigravityUserTier[]): string | undefined {
+export function getDefaultTierId(allowedTiers?: AntigravityUserTier[]): string | undefined {
   if (!allowedTiers || allowedTiers.length === 0) {
     return undefined;
   }
@@ -81,7 +144,7 @@ function wait(ms: number): Promise<void> {
 /**
  * Extracts the cloudaicompanion project id from loadCodeAssist responses.
  */
-function extractManagedProjectId(payload: LoadCodeAssistPayload | null): string | undefined {
+export function extractManagedProjectId(payload: LoadCodeAssistPayload | null): string | undefined {
   if (!payload) {
     return undefined;
   }
@@ -170,8 +233,6 @@ export async function onboardManagedProject(
   accessToken: string,
   tierId: string,
   projectId?: string,
-  attempts = 10,
-  delayMs = 5000,
 ): Promise<string | undefined> {
   const metadata = buildMetadata(projectId);
   const requestBody: Record<string, unknown> = {
@@ -180,39 +241,52 @@ export async function onboardManagedProject(
   };
 
   for (const baseEndpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      try {
-        const response = await fetch(
-          `${baseEndpoint}/v1internal:onboardUser`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${accessToken}`,
-              ...getAntigravityHeaders(),
-            },
-            body: JSON.stringify(requestBody),
+    try {
+      const response = await fetch(
+        `${baseEndpoint}/v1internal:onboardUser`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+            "User-Agent": "google-api-nodejs-client/9.15.1",
+            "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+            "Client-Metadata": getAntigravityHeaders()["Client-Metadata"],
           },
-        );
+          body: JSON.stringify(requestBody),
+        },
+      );
 
-        if (!response.ok) {
-          break;
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const validation = isValidationRequired(errorData);
+        if (validation.required) {
+          log.warn("Onboarding requires account validation", { url: validation.url });
         }
-
-        const payload = (await response.json()) as OnboardUserPayload;
-        const managedProjectId = payload.response?.cloudaicompanionProject?.id;
-        if (payload.done && managedProjectId) {
-          return managedProjectId;
-        }
-        if (payload.done && projectId) {
-          return projectId;
-        }
-      } catch (error) {
-        log.debug("Failed to onboard managed project", { endpoint: baseEndpoint, error: String(error) });
-        break;
+        continue;
       }
 
-      await wait(delayMs);
+      let payload = (await response.json()) as OnboardUserPayload;
+      
+      // Handle long-running operations via polling
+      if (!payload.done && payload.name) {
+        log.debug("Onboarding started, polling operation", { name: payload.name });
+        const result = await pollOperation(accessToken, baseEndpoint, payload.name);
+        if (result) {
+          payload = result;
+        }
+      }
+
+      const managedProjectId = payload.response?.cloudaicompanionProject?.id;
+      if (payload.done && managedProjectId) {
+        return managedProjectId;
+      }
+      if (payload.done && projectId) {
+        return projectId;
+      }
+    } catch (error) {
+      log.debug("Failed to onboard managed project", { endpoint: baseEndpoint, error: String(error) });
+      continue;
     }
   }
 
@@ -223,9 +297,11 @@ export async function onboardManagedProject(
  * Resolves an effective project ID for the current auth state, caching results per refresh token.
  */
 export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<ProjectContextResult> {
+  const envProjectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID;
+  
   const accessToken = auth.access;
   if (!accessToken) {
-    return { auth, effectiveProjectId: "" };
+    return { auth, effectiveProjectId: envProjectId || "" };
   }
 
   const cacheKey = getCacheKey(auth);
@@ -242,6 +318,13 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
 
   const resolveContext = async (): Promise<ProjectContextResult> => {
     const parts = parseRefreshParts(auth.refresh);
+    
+    // Environment variable takes highest precedence (matching Gemini CLI)
+    if (envProjectId) {
+      log.debug("Using project ID from environment", { envProjectId });
+      return { auth, effectiveProjectId: envProjectId };
+    }
+
     if (parts.managedProjectId) {
       return { auth, effectiveProjectId: parts.managedProjectId };
     }

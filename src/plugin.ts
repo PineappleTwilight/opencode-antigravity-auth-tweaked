@@ -11,7 +11,7 @@ import {
 import { authorizeAntigravity, exchangeAntigravity } from "./antigravity/oauth";
 import type { AntigravityTokenExchangeResult } from "./antigravity/oauth";
 import { accessTokenExpired, isOAuthAuth, parseRefreshParts, formatRefreshParts } from "./plugin/auth";
-import { promptAddAnotherAccount, promptLoginMode, promptProjectId } from "./plugin/cli";
+import { promptAddAnotherAccount, promptLoginMode } from "./plugin/cli";
 import { ensureProjectContext } from "./plugin/project";
 import {
   startAntigravityDebugRequest, 
@@ -2511,11 +2511,18 @@ export const createAntigravityPlugin = (providerId: string) => async (
             process.env.OPENCODE_HEADLESS
           );
 
+          // Environment variable takes highest precedence (matching Gemini CLI)
+          const envProjectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID;
+
           // CLI flow (`opencode auth login`) passes an inputs object.
           if (inputs) {
             const accounts: Array<Extract<AntigravityTokenExchangeResult, { type: "success" }>> = [];
             const noBrowser = inputs.noBrowser === "true" || inputs["no-browser"] === "true";
             const useManualMode = noBrowser || shouldSkipLocalServer();
+
+            if (envProjectId) {
+              console.log(`\nUsing project ID from environment: ${envProjectId}\n`);
+            }
 
             // Check for existing accounts and prompt user for login mode
             let startFresh = true;
@@ -2976,10 +2983,10 @@ export const createAntigravityPlugin = (providerId: string) => async (
             while (accounts.length < MAX_OAUTH_ACCOUNTS) {
               console.log(`\n=== Antigravity OAuth (Account ${accounts.length + 1}) ===`);
 
-              const projectId = await promptProjectId();
+              const projectId = "";
 
               const result = await (async (): Promise<AntigravityTokenExchangeResult> => {
-                const authorization = await authorizeAntigravity(projectId);
+                const authorization = await authorizeAntigravity();
                 const fallbackState = getStateFromAuthorizationUrl(authorization.url);
 
                 console.log("\nOAuth URL:\n" + authorization.url + "\n");
@@ -3194,7 +3201,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
             }
           }
 
-          const authorization = await authorizeAntigravity(projectId);
+          const authorization = await authorizeAntigravity();
           const fallbackState = getStateFromAuthorizationUrl(authorization.url);
 
           if (!useManualFlow) {
