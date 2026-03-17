@@ -139,22 +139,38 @@ async function fetchProjectID(accessToken: string): Promise<string> {
   // Environment variable takes highest precedence (matching Gemini CLI)
   const envProjectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT_ID;
   if (envProjectId) {
+    console.log(`Using project ID from environment: ${envProjectId}`);
     log.debug("Using project ID from environment during OAuth", { envProjectId });
     return envProjectId;
   }
 
   try {
+    console.log("Resolving Antigravity managed project...");
     // Try to resolve a managed project from Antigravity if possible.
     const loadPayload = await loadManagedProject(accessToken);
-    const resolvedManagedProjectId = extractManagedProjectId(loadPayload);
+    let resolvedManagedProjectId = extractManagedProjectId(loadPayload);
 
     if (resolvedManagedProjectId) {
+      console.log(`Resolved project: ${resolvedManagedProjectId}`);
       log.debug("Resolved managed project via loadCodeAssist", { resolvedManagedProjectId });
       return resolvedManagedProjectId;
     }
 
+    // Try CLI-style resolution as a fallback
+    console.log("Antigravity resolution failed, trying CLI fallback...");
+    log.debug("Antigravity resolution failed, attempting CLI load fallback");
+    const cliLoadPayload = await loadManagedProject(accessToken, undefined, true);
+    resolvedManagedProjectId = extractManagedProjectId(cliLoadPayload);
+
+    if (resolvedManagedProjectId) {
+      console.log(`Resolved project via CLI fallback: ${resolvedManagedProjectId}`);
+      log.debug("Resolved managed project via CLI load fallback", { resolvedManagedProjectId });
+      return resolvedManagedProjectId;
+    }
+
     // No managed project found - try to auto-provision one via onboarding.
-    const tierId = getDefaultTierId(loadPayload?.allowedTiers) ?? "FREE";
+    const tierId = getDefaultTierId(loadPayload?.allowedTiers || cliLoadPayload?.allowedTiers) ?? "FREE";
+    console.log(`Auto-provisioning managed project (tier: ${tierId})...`);
     log.debug("Auto-provisioning managed project", { tierId });
     
     const provisionedProjectId = await onboardManagedProject(
@@ -163,12 +179,32 @@ async function fetchProjectID(accessToken: string): Promise<string> {
     );
 
     if (provisionedProjectId) {
+      console.log(`Successfully provisioned project: ${provisionedProjectId}`);
       log.debug("Successfully provisioned managed project", { provisionedProjectId });
       return provisionedProjectId;
     }
 
+    // Try CLI-style onboarding as a fallback
+    console.log("Antigravity provisioning failed, falling back to CLI onboarding...");
+    log.debug("Antigravity provisioning failed, attempting CLI fallback");
+    
+    const cliProvisionedProjectId = await onboardManagedProject(
+      accessToken,
+      tierId,
+      undefined,
+      true // useCliStyle
+    );
+
+    if (cliProvisionedProjectId) {
+      console.log(`Successfully provisioned project via CLI fallback: ${cliProvisionedProjectId}`);
+      log.debug("Successfully provisioned managed project via CLI fallback", { cliProvisionedProjectId });
+      return cliProvisionedProjectId;
+    }
+
+    console.log("Warning: Failed to provision managed project - account may have limited access.");
     log.warn("Failed to provision managed project - account may not work correctly");
   } catch (error) {
+    console.log(`Error during project discovery: ${error instanceof Error ? error.message : String(error)}`);
     log.warn("Error during project discovery/onboarding", { error: String(error) });
   }
 
@@ -237,6 +273,7 @@ export async function exchangeAntigravity(
 
     const storedRefresh = formatRefreshParts({
       refreshToken,
+      projectId: effectiveProjectId || "",
       managedProjectId: effectiveProjectId || "",
     });
 

@@ -3,6 +3,7 @@ import {
   ANTIGRAVITY_ENDPOINT_FALLBACKS,
   ANTIGRAVITY_LOAD_ENDPOINTS,
   ANTIGRAVITY_DEFAULT_PROJECT_ID,
+  GEMINI_CLI_HEADERS,
 } from "../constants";
 import { formatRefreshParts, parseRefreshParts } from "./auth";
 import { createLogger } from "./logger";
@@ -184,16 +185,22 @@ export function invalidateProjectContextCache(refresh?: string): void {
 export async function loadManagedProject(
   accessToken: string,
   projectId?: string,
+  useCliStyle = false,
 ): Promise<LoadCodeAssistPayload | null> {
-  const metadata = buildMetadata(projectId);
+  const metadata = useCliStyle 
+    ? { ideType: "IDE_UNSPECIFIED", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" }
+    : buildMetadata(projectId);
+    
   const requestBody: Record<string, unknown> = { metadata };
 
   const loadHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${accessToken}`,
-    "User-Agent": "google-api-nodejs-client/9.15.1",
-    "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-    "Client-Metadata": getAntigravityHeaders()["Client-Metadata"],
+    ... (useCliStyle ? GEMINI_CLI_HEADERS : {
+      "User-Agent": "google-api-nodejs-client/9.15.1",
+      "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+      "Client-Metadata": getAntigravityHeaders()["Client-Metadata"],
+    }),
   };
 
   const loadEndpoints = Array.from(
@@ -233,35 +240,65 @@ export async function onboardManagedProject(
   accessToken: string,
   tierId: string,
   projectId?: string,
+  useCliStyle = false,
 ): Promise<string | undefined> {
-  const metadata = buildMetadata(projectId);
+  const metadata = useCliStyle 
+    ? { ideType: "IDE_UNSPECIFIED", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" }
+    : buildMetadata(projectId);
+
   const requestBody: Record<string, unknown> = {
     tierId,
     metadata,
   };
 
-  for (const baseEndpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
+  const endpoints = Array.from(
+    new Set<string>([...ANTIGRAVITY_LOAD_ENDPOINTS, ...ANTIGRAVITY_ENDPOINT_FALLBACKS]),
+  );
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${accessToken}`,
+    ... (useCliStyle ? GEMINI_CLI_HEADERS : {
+      "User-Agent": "google-api-nodejs-client/9.15.1",
+      "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+      "Client-Metadata": getAntigravityHeaders()["Client-Metadata"],
+    }),
+  };
+
+  for (const baseEndpoint of endpoints) {
     try {
+      log.debug("Attempting onboarding at endpoint", { baseEndpoint, useCliStyle });
       const response = await fetch(
         `${baseEndpoint}/v1internal:onboardUser`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${accessToken}`,
-            "User-Agent": "google-api-nodejs-client/9.15.1",
-            "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-            "Client-Metadata": getAntigravityHeaders()["Client-Metadata"],
-          },
+          headers,
           body: JSON.stringify(requestBody),
         },
       );
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
+        const errorText = await response.text().catch(() => "Unknown error");
+        let errorData: any = {};
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          // not json
+        }
+
         const validation = isValidationRequired(errorData);
         if (validation.required) {
+          console.log(`\nAccount validation required: ${validation.message || "Please visit the URL below"}`);
+          if (validation.url) {
+            console.log(`URL: ${validation.url}\n`);
+          }
           log.warn("Onboarding requires account validation", { url: validation.url });
+        } else {
+          log.debug("Onboarding request failed", { 
+            status: response.status, 
+            endpoint: baseEndpoint,
+            error: errorText 
+          });
         }
         continue;
       }
@@ -345,15 +382,29 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
 
     // Try to resolve a managed project from Antigravity if possible.
     const loadPayload = await loadManagedProject(accessToken, parts.projectId ?? fallbackProjectId);
-    const resolvedManagedProjectId = extractManagedProjectId(loadPayload);
+    let resolvedManagedProjectId = extractManagedProjectId(loadPayload);
 
     if (resolvedManagedProjectId) {
       return persistManagedProject(resolvedManagedProjectId);
     }
 
+    // Try CLI-style load as a fallback
+    log.debug("Antigravity load failed, attempting CLI load fallback", { projectId: parts.projectId });
+    const cliLoadPayload = await loadManagedProject(
+      accessToken,
+      parts.projectId ?? fallbackProjectId,
+      true // useCliStyle
+    );
+    resolvedManagedProjectId = extractManagedProjectId(cliLoadPayload);
+
+    if (resolvedManagedProjectId) {
+      log.debug("Successfully resolved managed project via CLI load fallback", { resolvedManagedProjectId });
+      return persistManagedProject(resolvedManagedProjectId);
+    }
+
     // No managed project found - try to auto-provision one via onboarding.
-    // This handles accounts that were added before managed project provisioning was required.
-    const tierId = getDefaultTierId(loadPayload?.allowedTiers) ?? "FREE";
+    // Use the allowed tiers from whichever load response we got (preferring Antigravity)
+    const tierId = getDefaultTierId(loadPayload?.allowedTiers || cliLoadPayload?.allowedTiers) ?? "FREE";
     log.debug("Auto-provisioning managed project", { tierId, projectId: parts.projectId });
     
     const provisionedProjectId = await onboardManagedProject(
@@ -365,6 +416,20 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
     if (provisionedProjectId) {
       log.debug("Successfully provisioned managed project", { provisionedProjectId });
       return persistManagedProject(provisionedProjectId);
+    }
+
+    // Try CLI-style onboarding as a fallback
+    log.debug("Antigravity provisioning failed, attempting CLI fallback", { tierId, projectId: parts.projectId });
+    const cliProvisionedProjectId = await onboardManagedProject(
+      accessToken,
+      tierId,
+      parts.projectId,
+      true // useCliStyle
+    );
+
+    if (cliProvisionedProjectId) {
+      log.debug("Successfully provisioned managed project via CLI fallback", { cliProvisionedProjectId });
+      return persistManagedProject(cliProvisionedProjectId);
     }
 
     log.warn("Failed to provision managed project - account may not work correctly", {

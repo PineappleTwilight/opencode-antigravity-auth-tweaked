@@ -425,20 +425,22 @@ export class TokenBucketTracker {
 
   /**
    * Check if account has enough tokens for a request.
-   * @param family Model family
+   * @param familyOrCost Model family or direct numeric cost
    * @param model Model name
    */
-  hasTokens(accountIndex: number, family?: string | null, model?: string | null): boolean {
-    const cost = this.getModelCost(family, model);
+  hasTokens(accountIndex: number, familyOrCost?: string | number | null, model?: string | null): boolean {
+    const cost = typeof familyOrCost === "number" ? familyOrCost : this.getModelCost(familyOrCost, model);
     return this.getTokens(accountIndex) >= cost;
   }
 
   /**
    * Consume tokens for a request.
+   * @param familyOrCost Model family or direct numeric cost
+   * @param model Model name
    * @returns true if tokens were consumed, false if insufficient
    */
-  consume(accountIndex: number, family?: string | null, model?: string | null): boolean {
-    const cost = this.getModelCost(family, model);
+  consume(accountIndex: number, familyOrCost?: string | number | null, model?: string | null): boolean {
+    const cost = typeof familyOrCost === "number" ? familyOrCost : this.getModelCost(familyOrCost, model);
     const current = this.getTokens(accountIndex);
     if (current < cost) {
       return false;
@@ -453,9 +455,11 @@ export class TokenBucketTracker {
 
   /**
    * Refund tokens (e.g., if request wasn't actually sent).
+   * @param familyOrCost Model family or direct numeric cost
+   * @param model Model name
    */
-  refund(accountIndex: number, family?: string | null, model?: string | null): void {
-    const cost = this.getModelCost(family, model);
+  refund(accountIndex: number, familyOrCost?: string | number | null, model?: string | null): void {
+    const cost = typeof familyOrCost === "number" ? familyOrCost : this.getModelCost(familyOrCost, model);
     const current = this.getTokens(accountIndex);
     this.buckets.set(accountIndex, {
       tokens: Math.min(this.config.maxTokens, current + cost),
