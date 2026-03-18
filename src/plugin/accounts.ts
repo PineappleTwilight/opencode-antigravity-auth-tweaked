@@ -49,8 +49,8 @@ export function parseRateLimitReason(
   status?: number
 ): RateLimitReason {
   // 1. Status Code Checks (Rust parity)
-  // 529 = Site Overloaded, 503 = Service Unavailable -> Capacity issues
-  if (status === 529 || status === 503) return "MODEL_CAPACITY_EXHAUSTED";
+  // 529 = Site Overloaded, 503 = Service Unavailable, 502 = Bad Gateway, 504 = Gateway Timeout -> Capacity/Transient issues
+  if (status === 529 || status === 503 || status === 502 || status === 504) return "MODEL_CAPACITY_EXHAUSTED";
   // 500 = Internal Server Error -> Treat as Server Error (soft wait)
   if (status === 500) return "SERVER_ERROR";
 

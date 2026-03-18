@@ -2040,8 +2040,8 @@ export const createAntigravityPlugin = (providerId: string) => async (
 
 
 
-                // Handle 429 rate limit (or Service Overloaded) with improved logic
-                if (response.status === 429 || response.status === 503 || response.status === 529) {
+                // Handle 429 rate limit or 5xx Server Errors with improved logic
+                if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
                   // Refund token on rate limit
                   if (tokenConsumed) {
                     getTokenTracker().refund(account.index, family, model);
@@ -2057,71 +2057,19 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   // [Enhanced Parsing] Pass status to handling logic
                   const rateLimitReason = parseRateLimitReason(bodyInfo.reason, bodyInfo.message, response.status);
 
-                  // STRATEGY 1: CAPACITY / SERVER ERROR (Transient)
-                  // Goal: Wait and Retry SAME Account. DO NOT LOCK.
-                  // We handle this FIRST to avoid calling getRateLimitBackoff() and polluting the global rate limit state for transient errors.
-                  if (rateLimitReason === "MODEL_CAPACITY_EXHAUSTED" || rateLimitReason === "SERVER_ERROR") {
-                     // Exponential backoff with jitter for capacity errors: 1s → 2s → 4s → 8s (max)
-                     // Matches Antigravity-Manager's ExponentialBackoff(1s, 8s)
-                     const baseDelayMs = 1000;
-                     const maxDelayMs = 8000;
-                     const exponentialDelay = Math.min(baseDelayMs * Math.pow(2, capacityRetryCount), maxDelayMs);
-                     // Add ±10% jitter to prevent thundering herd
-                     const jitter = exponentialDelay * (0.9 + Math.random() * 0.2);
-                     const waitMs = Math.round(jitter);
-                     const waitSec = Math.round(waitMs / 1000);
-                     
-                     pushDebug(`Server busy (${rateLimitReason}) on account ${account.index}, exponential backoff ${waitMs}ms (attempt ${capacityRetryCount + 1})`);
-
-                     await showToast(
-                       `⏳ Server busy (${response.status}). Retrying in ${waitSec}s...`,
-                       "warning",
-                     );
-
-                     
-                     await sleep(waitMs, abortSignal);
-                     
-                     // CRITICAL FIX: Decrement i so that the loop 'continue' retries the SAME endpoint index
-                     // (i++ in the loop will bring it back to the current index)
-                     // But limit retries to prevent infinite loops (Greptile feedback)
-                     if (capacityRetryCount < 3) {
-                       capacityRetryCount++;
-                       i -= 1;
-                       continue; 
-                      } else {
-                        pushDebug(`Max capacity retries (3) exhausted for endpoint ${currentEndpoint}, regenerating fingerprint...`);
-                        // Regenerate fingerprint to get fresh device identity before trying next endpoint
-                        const newFingerprint = accountManager.regenerateAccountFingerprint(account.index);
-                        if (newFingerprint) {
-                          pushDebug(`Fingerprint regenerated for account ${account.index}`);
-                        }
-                        continue;
-                      }
-                  }
-
-                  // STRATEGY 2: RATE LIMIT EXCEEDED (RPM) / QUOTA EXHAUSTED / UNKNOWN
-                  // Goal: Lock and Rotate (Standard Logic)
-                  
-                  // Only now do we call getRateLimitBackoff, which increments the global failure tracker
+                  // Calculate backoff/wait time
                   const quotaKey = headerStyleToQuotaKey(headerStyle, family);
-                  const { attempt, delayMs, isDuplicate } = getRateLimitBackoff(account.index, quotaKey, serverRetryMs);
-                  
-                  // Calculate potential backoffs
+                  const { attempt, delayMs } = getRateLimitBackoff(account.index, quotaKey, serverRetryMs);
                   const smartBackoffMs = calculateBackoffMs(rateLimitReason, account.consecutiveFailures ?? 0, serverRetryMs);
                   const effectiveDelayMs = Math.max(delayMs, smartBackoffMs);
 
+                  const accountLabel = account.email || `Account ${account.index + 1}`;
+
                   pushDebug(
-                    `429 idx=${account.index} email=${account.email ?? ""} family=${family} delayMs=${effectiveDelayMs} attempt=${attempt} reason=${rateLimitReason}`,
+                    `RateLimit/ServerError idx=${account.index} status=${response.status} family=${family} delayMs=${effectiveDelayMs} attempt=${attempt} reason=${rateLimitReason}`,
                   );
-                  if (bodyInfo.message) {
-                    pushDebug(`429 message=${bodyInfo.message}`);
-                  }
-                  if (bodyInfo.quotaResetTime) {
-                    pushDebug(`429 quotaResetTime=${bodyInfo.quotaResetTime}`);
-                  }
-                  if (bodyInfo.reason) {
-                    pushDebug(`429 reason=${bodyInfo.reason}`);
-                  }
+                  if (bodyInfo.message) pushDebug(`429/5xx message=${bodyInfo.message}`);
+                  if (bodyInfo.reason) pushDebug(`429/5xx reason=${bodyInfo.reason}`);
 
                    logRateLimitEvent(
                     account.index,
@@ -2132,44 +2080,43 @@ export const createAntigravityPlugin = (providerId: string) => async (
                     bodyInfo,
                   );
 
-                  await logResponseBody(debugContext, response, 429);
+                  await logResponseBody(debugContext, response, response.status);
 
                   getHealthTracker().recordRateLimit(account.index);
 
-                  const accountLabel = account.email || `Account ${account.index + 1}`;
+                  // ENHANCED RATE LIMIT HANDLING:
+                  // Actually wait for the ratelimited amount of time (plus 1-3s random jitter)
+                  // unless the ratelimit is over 60s.
+                  const waitThresholdMs = 60_000;
+                  
+                  if (effectiveDelayMs <= waitThresholdMs && rateLimitReason !== "QUOTA_EXHAUSTED") {
+                    const extraWaitMs = Math.floor(Math.random() * 2000) + 1000; // 1-3s random
+                    const totalWaitMs = effectiveDelayMs + extraWaitMs;
+                    const waitSec = Math.ceil(totalWaitMs / 1000);
 
-                  // Progressive retry for standard 429s: 1st 429 → 1s then switch (if enabled) or retry same
-                  if (attempt === 1 && rateLimitReason !== "QUOTA_EXHAUSTED") {
-                    await showToast(`Rate limited. Quick retry in 1s...`, "warning");
-                    await sleep(FIRST_RETRY_DELAY_MS, abortSignal);
-                    
-                    // CacheFirst mode: wait for same account if within threshold (preserves prompt cache)
-                    if (config.scheduling_mode === 'cache_first') {
-                      const maxCacheFirstWaitMs = config.max_cache_first_wait_seconds * 1000;
-                      // effectiveDelayMs is the backoff calculated for this account
-                      if (effectiveDelayMs <= maxCacheFirstWaitMs) {
-                        pushDebug(`cache_first: waiting ${effectiveDelayMs}ms for same account to recover`);
-                        await showToast(`⏳ Waiting ${Math.ceil(effectiveDelayMs / 1000)}s for same account (prompt cache preserved)...`, "info");
-                        accountManager.markRateLimitedWithReason(account, family, headerStyle, model, rateLimitReason, serverRetryMs);
-                        await sleep(effectiveDelayMs, abortSignal);
-                        // Retry same endpoint after wait
-                        i -= 1;
-                        continue;
-                      }
-                      // Wait time exceeds threshold, fall through to switch
-                      pushDebug(`cache_first: wait ${effectiveDelayMs}ms exceeds max ${maxCacheFirstWaitMs}ms, switching account`);
+                    pushDebug(`Rate limited (${rateLimitReason}), waiting ${totalWaitMs}ms (${effectiveDelayMs} + ${extraWaitMs} jitter)`);
+
+                    await showToast(
+                      `⏳ Rate limited (${rateLimitReason}). Waiting ${waitSec}s to retry same account...`,
+                      "warning",
+                    );
+
+                    // If this is a repeated hit, try regenerating fingerprint as a mitigation
+                    if (attempt > 1) {
+                      pushDebug(`Regenerating fingerprint for account ${account.index} after ${attempt} consecutive hits`);
+                      accountManager.regenerateAccountFingerprint(account.index);
                     }
+
+                    await sleep(totalWaitMs, abortSignal);
                     
-                    if (config.switch_on_first_rate_limit && accountCount > 1) {
-                      accountManager.markRateLimitedWithReason(account, family, headerStyle, model, rateLimitReason, serverRetryMs, config.failure_ttl_seconds * 1000);
-                      shouldSwitchAccount = true;
-                      break;
-                    }
-                    
-                    // Same endpoint retry for first RPM hit
-                    i -= 1; 
+                    // After waiting, we retry the same account/endpoint
+                    i -= 1;
                     continue;
                   }
+
+                  // If > 60s or QUOTA_EXHAUSTED, assume quota reached
+                  pushDebug(`Quota reached or long wait (${effectiveDelayMs}ms) for ${accountLabel}. Switching account.`);
+                  await showToast(`Quota reached for ${accountLabel}. Switching account...`, "error");
 
                   accountManager.markRateLimitedWithReason(account, family, headerStyle, model, rateLimitReason, serverRetryMs, config.failure_ttl_seconds * 1000);
 
