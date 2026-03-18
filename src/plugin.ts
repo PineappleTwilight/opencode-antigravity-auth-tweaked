@@ -2093,6 +2093,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   );
                   if (bodyInfo.message) pushDebug(`429/5xx message=${bodyInfo.message}`);
                   if (bodyInfo.reason) pushDebug(`429/5xx reason=${bodyInfo.reason}`);
+                  if (!bodyInfo.message && bodyInfo.rawBody) pushDebug(`429/5xx NO MESSAGE - rawBody preview: ${bodyInfo.rawBody.slice(0, 200)}`);
 
                    logRateLimitEvent(
                     account.index,
