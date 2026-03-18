@@ -2161,7 +2161,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                       // Check if any other account has Antigravity quota for this model
                       if (hasOtherAccountWithAntigravity(account)) {
                         pushDebug(`antigravity exhausted on account ${account.index}, but available on others. Switching account.`);
-                        await showToast(`Rate limited (${displayReason}). Switching account in 5s...`, "warning");
+                        await showToast(`Quota exhausted. Switching account in 5s...`, "warning");
                         await sleep(SWITCH_ACCOUNT_DELAY_MS, abortSignal);
                         shouldSwitchAccount = true;
                         lastFailure = createFailureContext(response);
@@ -2212,16 +2212,24 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   }
 
                   if (accountCount > 1) {
-                    const quotaMsg = bodyInfo.quotaResetTime 
+                    const quotaMsg = bodyInfo.quotaResetTime
                       ? ` (quota resets ${bodyInfo.quotaResetTime})`
                       : ``;
-                    await showToast(`Quota reached (${displayReason}) for ${accountLabel}. Switching account in 5s...${quotaMsg}`, "error");
+                    // For quota exhausted, show a shorter, clearer message
+                    const toastMsg = rateLimitReason === "QUOTA_EXHAUSTED"
+                      ? `Quota exhausted${quotaMsg}. Switching account in 5s...`
+                      : `Quota reached (${displayReason}) for ${accountLabel}. Switching account in 5s...${quotaMsg}`;
+                    await showToast(toastMsg, "error");
                     await sleep(SWITCH_ACCOUNT_DELAY_MS, abortSignal);
                   } else {
                     // Single account: exponential backoff (1s, 2s, 4s, 8s... max 60s)
                     const expBackoffMs = Math.min(FIRST_RETRY_DELAY_MS * Math.pow(2, attempt - 1), 60000);
                     const expBackoffFormatted = expBackoffMs >= 1000 ? `${Math.round(expBackoffMs / 1000)}s` : `${expBackoffMs}ms`;
-                    await showToast(`Quota reached (${displayReason}). Retrying in ${expBackoffFormatted} (attempt ${attempt})...`, "error");
+                    // For quota exhausted, show a shorter, clearer message
+                    const toastMsg = rateLimitReason === "QUOTA_EXHAUSTED"
+                      ? `Quota exhausted${bodyInfo.quotaResetTime ? ` (resets ${bodyInfo.quotaResetTime})` : ``}. Retrying in ${expBackoffFormatted} (attempt ${attempt})...`
+                      : `Quota reached (${displayReason}). Retrying in ${expBackoffFormatted} (attempt ${attempt})...`;
+                    await showToast(toastMsg, "error");
                     await sleep(expBackoffMs, abortSignal);
                   }
 
