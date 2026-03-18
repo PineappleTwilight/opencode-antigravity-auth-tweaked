@@ -961,11 +961,12 @@ interface RateLimitBodyInfo {
   message?: string;
   quotaResetTime?: string;
   reason?: string;
+  rawBody?: string;  // Raw response body for fallback display
 }
 
-function extractRateLimitBodyInfo(body: unknown): RateLimitBodyInfo {
+function extractRateLimitBodyInfo(body: unknown, rawBody?: string): RateLimitBodyInfo {
   if (!body || typeof body !== "object") {
-    return { retryDelayMs: null };
+    return { retryDelayMs: null, rawBody };
   }
 
   // Try to extract error from common response structures
@@ -1012,7 +1013,7 @@ function extractRateLimitBodyInfo(body: unknown): RateLimitBodyInfo {
         if (typeof retryDelay === "string") {
           const retryDelayMs = parseDurationToMs(retryDelay);
           if (retryDelayMs !== null) {
-            return { retryDelayMs, message, reason };
+            return { retryDelayMs, message, reason, rawBody };
           }
         }
       }
@@ -1027,7 +1028,7 @@ function extractRateLimitBodyInfo(body: unknown): RateLimitBodyInfo {
         if (typeof quotaResetDelay === "string") {
           const quotaResetDelayMs = parseDurationToMs(quotaResetDelay);
           if (quotaResetDelayMs !== null) {
-            return { retryDelayMs: quotaResetDelayMs, message, quotaResetTime, reason };
+            return { retryDelayMs: quotaResetDelayMs, message, quotaResetTime, reason, rawBody };
           }
         }
       }
@@ -1040,12 +1041,12 @@ function extractRateLimitBodyInfo(body: unknown): RateLimitBodyInfo {
     if (rawDuration) {
       const parsed = parseDurationToMs(rawDuration);
       if (parsed !== null) {
-        return { retryDelayMs: parsed, message, reason };
+        return { retryDelayMs: parsed, message, reason, rawBody };
       }
     }
   }
 
-  return { retryDelayMs: null, message, reason };
+  return { retryDelayMs: null, message, reason, rawBody };
 }
 
 async function extractRetryInfoFromBody(response: Response): Promise<RateLimitBodyInfo> {
@@ -1053,10 +1054,12 @@ async function extractRetryInfoFromBody(response: Response): Promise<RateLimitBo
     const text = await response.clone().text();
     try {
       const parsed = JSON.parse(text) as unknown;
-      return extractRateLimitBodyInfo(parsed);
+      const info = extractRateLimitBodyInfo(parsed);
+      // Always include raw body for fallback display
+      return { ...info, rawBody: text };
     } catch {
       // JSON parsing failed, but text might contain a plain error message
-      return { retryDelayMs: null, message: text.trim() || undefined };
+      return { retryDelayMs: null, message: text.trim() || undefined, rawBody: text };
     }
   } catch {
     return { retryDelayMs: null };
@@ -2099,15 +2102,15 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   getHealthTracker().recordRateLimit(account.index);
 
                   // Define display reason for user feedback
-                  // Always prefer the actual server message when available, otherwise use the classified reason
+                  // Never show "UNKNOWN" - show the full response body or "NO_BODY" instead
                   let displayReason: string;
                   if (bodyInfo.message && bodyInfo.message.trim()) {
                     displayReason = bodyInfo.message;
-                  } else if (rateLimitReason === "UNKNOWN") {
-                    // Only show "UNKNOWN" as a last resort
-                    displayReason = "UNKNOWN";
+                  } else if (bodyInfo.rawBody && bodyInfo.rawBody.trim()) {
+                    // Show the full raw response body when parsing failed or no structured message found
+                    displayReason = bodyInfo.rawBody;
                   } else {
-                    displayReason = rateLimitReason;
+                    displayReason = "NO_BODY";
                   }
 
                   // ENHANCED RATE LIMIT HANDLING:
