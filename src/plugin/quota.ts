@@ -222,7 +222,7 @@ async function fetchGeminiCliQuota(
   // Use Gemini CLI user-agent to get CLI quota buckets (not Antigravity buckets)
   const platform = process.platform || "darwin";
   const arch = process.arch || "arm64";
-  const geminiCliUserAgent = `GeminiCLI/1.0.0/gemini-2.5-pro (${platform}; ${arch})`;
+  const geminiCliUserAgent = `GeminiCLI/0.35.0-nightly.20260313.bb060d7a9/gemini-2.5-pro (${platform}; ${arch})`;
 
   const body = projectId ? { project: projectId } : {};
   

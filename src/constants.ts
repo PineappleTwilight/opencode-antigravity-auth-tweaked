@@ -105,9 +105,9 @@ export const ANTIGRAVITY_HEADERS = {
 } as const;
 
 export const GEMINI_CLI_HEADERS = {
-  "User-Agent": "google-api-nodejs-client/9.15.1",
-  "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-  "Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
+  "User-Agent": "GeminiCLI/0.35.0-nightly.20260313.bb060d7a9/gemini-2.5-pro (linux; x64; terminal)",
+  "X-Goog-Api-Client": "gl-node/20.20.1",
+  "Client-Metadata": "ideType=GEMINI_CLI,platform=LINUX_X64,pluginType=GEMINI",
 } as const;
 
 const ANTIGRAVITY_PLATFORMS = ["windows/amd64", "darwin/arm64", "darwin/amd64"] as const;
@@ -130,8 +130,13 @@ export type HeaderSet = {
 
 export function getRandomizedHeaders(style: HeaderStyle, model?: string): HeaderSet {
   if (style === "gemini-cli") {
+    const ua = GEMINI_CLI_HEADERS["User-Agent"];
+    const requestedModel = model || "gemini-2.0-flash";
+    // Replace the placeholder model (synced as gemini-2.5-pro) with the actual model
+    const finalUa = ua.replace("/gemini-2.5-pro ", `/${requestedModel} `);
+    
     return {
-      "User-Agent": GEMINI_CLI_HEADERS["User-Agent"],
+      "User-Agent": finalUa,
       "X-Goog-Api-Client": GEMINI_CLI_HEADERS["X-Goog-Api-Client"],
       "Client-Metadata": GEMINI_CLI_HEADERS["Client-Metadata"],
     };
