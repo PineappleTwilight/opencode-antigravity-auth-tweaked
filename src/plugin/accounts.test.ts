@@ -18,6 +18,7 @@ describe("AccountManager", () => {
   beforeEach(() => {
     vi.useRealTimers();
     vi.stubGlobal("process", { ...process, pid: 0 });
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
   });
 
   it("treats on-disk storage as source of truth, even when empty", () => {

@@ -388,7 +388,7 @@ async function ensureFileExists(path: string): Promise<void> {
   }
 }
 
-async function withFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+export async function withFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   await ensureFileExists(path);
   let release: (() => Promise<void>) | null = null;
   try {
@@ -782,6 +782,28 @@ async function loadAccountsUnsafe(): Promise<AccountStorageV4 | null> {
       return null;
     }
     return null;
+  }
+}
+
+/**
+ * Save accounts storage without acquiring a file lock.
+ * ONLY use this if you already hold the lock via withFileLock().
+ */
+export async function saveAccountsUnsafe(storage: AccountStorageV4): Promise<void> {
+  const path = getStoragePath();
+  const tempPath = `${path}.${randomBytes(6).toString("hex")}.tmp`;
+  const content = JSON.stringify(storage, null, 2);
+
+  try {
+    await fs.writeFile(tempPath, content, { encoding: "utf-8", mode: 0o600 });
+    await fs.rename(tempPath, path);
+  } catch (error) {
+    try {
+      await fs.unlink(tempPath);
+    } catch {
+      // ignore
+    }
+    throw error;
   }
 }
 

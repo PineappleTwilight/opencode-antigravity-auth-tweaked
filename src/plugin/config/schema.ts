@@ -368,6 +368,13 @@ export const AntigravityConfigSchema = z.object({
     * @default 0
     */
    request_jitter_max_ms: z.number().min(0).max(5000).default(0),
+
+   /**
+    * Maximum time in seconds to wait for an API response.
+    * 
+    * @default 120 (2 minutes)
+    */
+   request_timeout_seconds: z.number().min(5).max(600).default(120),
    
    /**
     * Soft quota threshold percentage (1-100).
@@ -474,6 +481,7 @@ export const DEFAULT_CONFIG: AntigravityConfig = {
   default_retry_after_seconds: 10,
   max_backoff_seconds: 60,
   request_jitter_max_ms: 0,
+  request_timeout_seconds: 120,
   soft_quota_threshold_percent: 90,
   quota_refresh_interval_minutes: 15,
   soft_quota_cache_ttl_minutes: "auto",

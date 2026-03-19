@@ -1,5 +1,17 @@
 import { formatRefreshParts, parseRefreshParts } from "./auth";
-import { loadAccounts, saveAccounts, type AccountStorageV4, type AccountMetadataV3, type RateLimitStateV3, type ModelFamily, type HeaderStyle, type CooldownReason } from "./storage";
+import { 
+  loadAccounts, 
+  saveAccounts, 
+  saveAccountsUnsafe,
+  withFileLock,
+  getStoragePath,
+  type AccountStorageV4, 
+  type AccountMetadataV3, 
+  type RateLimitStateV3, 
+  type ModelFamily, 
+  type HeaderStyle, 
+  type CooldownReason 
+} from "./storage";
 import type { OAuthAuthDetails, RefreshParts } from "./types";
 import type { AccountSelectionStrategy } from "./config/schema";
 import { getHealthTracker, getTokenTracker, selectHybridAccount, type AccountWithMetrics } from "./rotation";
@@ -30,7 +42,6 @@ const QUOTA_EXHAUSTED_BACKOFFS = [60_000, 300_000, 1_800_000, 7_200_000] as cons
 const RATE_LIMIT_EXCEEDED_BACKOFF = 30_000;
 // Increased from 15s to 45s base + jitter to reduce retry pressure on capacity errors
 const MODEL_CAPACITY_EXHAUSTED_BASE_BACKOFF = 45_000;
-const MODEL_CAPACITY_EXHAUSTED_JITTER_MAX = 30_000; // ±15s jitter range
 const SERVER_ERROR_BACKOFF = 20_000;
 const UNKNOWN_BACKOFF = 10_000;
 const MIN_BACKOFF_MS = 2_000;
@@ -66,18 +77,20 @@ export function parseRateLimitReason(
   if (message) {
     const lower = message.toLowerCase();
 
-    // Quota (Long Wait) - Check FIRST, before capacity/exhausted combinations
-    // "exhausted your capacity", "quota exhausted", etc. are quota issues, not transient capacity
-    if (lower.includes("exhausted")) {
-      return "QUOTA_EXHAUSTED";
-    }
+    // 1. Quota (Long Wait) - Explicit "quota" always high priority
     if (lower.includes("quota")) {
       return "QUOTA_EXHAUSTED";
     }
 
-    // Capacity / Overloaded (Transient) - Pure capacity issues without "exhausted"
+    // 2. Capacity / Overloaded (Transient) - Prioritize over general "exhausted"
+    // Handles "Model capacity exhausted" as capacity, not quota
     if (lower.includes("capacity") || lower.includes("overloaded")) {
       return "MODEL_CAPACITY_EXHAUSTED";
+    }
+
+    // 3. General Exhaustion (Long Wait) - Fallback for other "exhausted" messages
+    if (lower.includes("exhausted")) {
+      return "QUOTA_EXHAUSTED";
     }
 
     // RPM / TPM (Short Wait)
@@ -114,22 +127,31 @@ export function calculateBackoffMs(
     return Math.max(retryAfterMs, MIN_BACKOFF_MS);
   }
   
+  let baseMs: number;
   switch (reason) {
     case "QUOTA_EXHAUSTED": {
       const index = Math.min(consecutiveFailures, QUOTA_EXHAUSTED_BACKOFFS.length - 1);
-      return QUOTA_EXHAUSTED_BACKOFFS[index] ?? UNKNOWN_BACKOFF;
+      baseMs = QUOTA_EXHAUSTED_BACKOFFS[index] ?? UNKNOWN_BACKOFF;
+      break;
     }
     case "RATE_LIMIT_EXCEEDED":
-      return RATE_LIMIT_EXCEEDED_BACKOFF; // 30s
+      baseMs = RATE_LIMIT_EXCEEDED_BACKOFF;
+      break;
     case "MODEL_CAPACITY_EXHAUSTED":
-      // Apply jitter to prevent thundering herd on capacity errors
-      return MODEL_CAPACITY_EXHAUSTED_BASE_BACKOFF + generateJitter(MODEL_CAPACITY_EXHAUSTED_JITTER_MAX);
+      baseMs = MODEL_CAPACITY_EXHAUSTED_BASE_BACKOFF;
+      break;
     case "SERVER_ERROR":
-      return SERVER_ERROR_BACKOFF; // 20s
+      baseMs = SERVER_ERROR_BACKOFF;
+      break;
     case "UNKNOWN":
     default:
-      return UNKNOWN_BACKOFF; // 10s
+      baseMs = UNKNOWN_BACKOFF;
+      break;
   }
+
+  // Apply ±15% jitter to all backoff types to prevent thundering herd
+  const jitter = generateJitter(baseMs * 0.3);
+  return Math.max(MIN_BACKOFF_MS, Math.floor(baseMs + jitter));
 }
 
 export type BaseQuotaKey = "claude" | "gemini-antigravity" | "gemini-cli";
@@ -522,6 +544,7 @@ export class AccountManager {
     softQuotaThresholdPercent: number = 100,
     softQuotaCacheTtlMs: number = 10 * 60 * 1000,
     lastAccountForSession: number | null = null,
+    forceSwitch: boolean = false,
   ): ManagedAccount | null {
     const quotaKey = getQuotaKey(family, headerStyle, model);
 
@@ -542,6 +565,11 @@ export class AccountManager {
         .filter(acc => acc.enabled !== false)
         .map(acc => {
           clearExpiredRateLimits(acc);
+          
+          const quotaGroup = resolveQuotaGroup(family, model);
+          const groupData = acc.cachedQuota?.[quotaGroup];
+          const remainingQuotaFraction = groupData?.remainingFraction ?? 1;
+
           return {
             index: acc.index,
             lastUsed: acc.lastUsed,
@@ -549,11 +577,12 @@ export class AccountManager {
             isRateLimited: isRateLimitedForFamily(acc, family, model) ||
                           isOverSoftQuotaThreshold(acc, family, softQuotaThresholdPercent, softQuotaCacheTtlMs, model),
             isCoolingDown: this.isAccountCoolingDown(acc),
+            remainingQuotaFraction,
           };
         });
 
       // Get current account index for stickiness
-      const currentIndex = this.currentAccountIndexByFamily[family] ?? null;
+      const currentIndex = forceSwitch ? null : (this.currentAccountIndexByFamily[family] ?? null);
 
       const selectedIndex = selectHybridAccount(
         accountsWithMetrics, 
@@ -587,7 +616,7 @@ export class AccountManager {
       this.sessionOffsetApplied[family] = true;
     }
 
-    const current = this.getCurrentAccountForFamily(family);
+    const current = forceSwitch ? null : this.getCurrentAccountForFamily(family);
     if (current) {
       clearExpiredRateLimits(current);
       const isLimitedForRequestedStyle = isRateLimitedForHeaderStyle(current, family, headerStyle, model);
@@ -1257,5 +1286,72 @@ export class AccountManager {
     const minWait = Math.min(...waitTimes);
     // Treat 0 as stale cache (resetTime in the past) → fail-open to avoid spin loop
     return minWait === 0 ? null : minWait;
+  }
+
+  /**
+   * Performs an atomic update on a specific account, ensuring multi-process safety.
+   * Reloads accounts from disk, applies the update function, and saves back with a file lock.
+   * 
+   * @param index - Local index of the account to update
+   * @param updateFn - Function that receives current account state and returns updated state
+   */
+  async atomicUpdate(index: number, updateFn: (acc: ManagedAccount) => ManagedAccount | Promise<ManagedAccount>): Promise<void> {
+    const localAccount = this.accounts[index];
+    if (!localAccount) return;
+    
+    const refreshToken = localAccount.parts.refreshToken;
+
+    await withFileLock(getStoragePath(), async () => {
+      const stored = await loadAccounts();
+      if (!stored) return;
+
+      const storedIdx = stored.accounts.findIndex(a => a.refreshToken === refreshToken);
+      if (storedIdx === -1) return;
+
+      // Use constructor logic to parse stored accounts
+      const tempManager = new AccountManager(undefined, stored);
+      const managedAcc = tempManager.accounts[storedIdx];
+      if (!managedAcc) return;
+
+      const updatedManaged = await updateFn(managedAcc);
+      
+      // Update local memory in this instance
+      this.accounts[index] = updatedManaged;
+      
+      // Update tempManager and save
+      tempManager.accounts[storedIdx] = updatedManaged;
+      
+      const storage: AccountStorageV4 = {
+        version: 4,
+        accounts: tempManager.accounts.map((a) => ({
+          email: a.email,
+          refreshToken: a.parts.refreshToken,
+          projectId: a.parts.projectId,
+          managedProjectId: a.parts.managedProjectId,
+          addedAt: a.addedAt,
+          lastUsed: a.lastUsed,
+          enabled: a.enabled,
+          lastSwitchReason: a.lastSwitchReason,
+          rateLimitResetTimes: Object.keys(a.rateLimitResetTimes).length > 0 ? a.rateLimitResetTimes : undefined,
+          coolingDownUntil: a.coolingDownUntil,
+          cooldownReason: a.cooldownReason,
+          fingerprint: a.fingerprint,
+          fingerprintHistory: a.fingerprintHistory?.length ? a.fingerprintHistory : undefined,
+          cachedQuota: a.cachedQuota && Object.keys(a.cachedQuota).length > 0 ? a.cachedQuota : undefined,
+          cachedQuotaUpdatedAt: a.cachedQuotaUpdatedAt,
+          verificationRequired: a.verificationRequired,
+          verificationRequiredAt: a.verificationRequiredAt,
+          verificationRequiredReason: a.verificationRequiredReason,
+          verificationUrl: a.verificationUrl,
+        })),
+        activeIndex: Math.max(0, tempManager.currentAccountIndexByFamily.claude),
+        activeIndexByFamily: {
+          claude: Math.max(0, tempManager.currentAccountIndexByFamily.claude),
+          gemini: Math.max(0, tempManager.currentAccountIndexByFamily.gemini),
+        },
+      };
+
+      await saveAccountsUnsafe(storage);
+    });
   }
 }

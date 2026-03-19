@@ -416,8 +416,8 @@ describe("randomDelay", () => {
 describe("sortByLruWithHealth", () => {
   it("filters out rate-limited accounts", () => {
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: true, isCoolingDown: false },
-      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: true, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = sortByLruWithHealth(accounts);
@@ -427,8 +427,8 @@ describe("sortByLruWithHealth", () => {
 
   it("filters out cooling down accounts", () => {
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: true },
-      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: true, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = sortByLruWithHealth(accounts);
@@ -438,8 +438,8 @@ describe("sortByLruWithHealth", () => {
 
   it("filters out unhealthy accounts", () => {
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 40, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 40, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = sortByLruWithHealth(accounts, 50);
@@ -449,9 +449,9 @@ describe("sortByLruWithHealth", () => {
 
   it("sorts by lastUsed ascending (oldest first)", () => {
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 1000, healthScore: 70, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 500, healthScore: 70, isRateLimited: false, isCoolingDown: false },
-      { index: 2, lastUsed: 2000, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 1000, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 500, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 2, lastUsed: 2000, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = sortByLruWithHealth(accounts);
@@ -460,9 +460,9 @@ describe("sortByLruWithHealth", () => {
 
   it("uses health score as tiebreaker", () => {
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 1000, healthScore: 60, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 1000, healthScore: 80, isRateLimited: false, isCoolingDown: false },
-      { index: 2, lastUsed: 1000, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 1000, healthScore: 60, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 1000, healthScore: 80, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 2, lastUsed: 1000, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = sortByLruWithHealth(accounts);
@@ -471,8 +471,8 @@ describe("sortByLruWithHealth", () => {
 
   it("returns empty array when all accounts filtered out", () => {
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 30, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: true, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 30, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: true, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = sortByLruWithHealth(accounts, 50);
@@ -490,7 +490,7 @@ describe("selectHybridAccount", () => {
   it("returns null when all accounts filtered out by health", () => {
     const tokenTracker = new TokenBucketTracker();
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 30, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 30, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = selectHybridAccount(accounts, tokenTracker, 50);
@@ -500,9 +500,9 @@ describe("selectHybridAccount", () => {
   it("returns the best candidate by score", () => {
     const tokenTracker = new TokenBucketTracker();
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 1000, healthScore: 70, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 500, healthScore: 70, isRateLimited: false, isCoolingDown: false },
-      { index: 2, lastUsed: 2000, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 1000, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 500, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 2, lastUsed: 2000, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = selectHybridAccount(accounts, tokenTracker);
@@ -512,8 +512,8 @@ describe("selectHybridAccount", () => {
   it("filters out rate-limited accounts", () => {
     const tokenTracker = new TokenBucketTracker();
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: true, isCoolingDown: false },
-      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: true, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = selectHybridAccount(accounts, tokenTracker);
@@ -525,8 +525,8 @@ describe("selectHybridAccount", () => {
     tokenTracker.consume(0, 10);  // Account 0 now has 0 tokens
 
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = selectHybridAccount(accounts, tokenTracker);
@@ -536,8 +536,8 @@ describe("selectHybridAccount", () => {
   it("filters out unhealthy accounts", () => {
     const tokenTracker = new TokenBucketTracker();
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 40, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 40, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = selectHybridAccount(accounts, tokenTracker, 50);
@@ -547,7 +547,7 @@ describe("selectHybridAccount", () => {
   it("returns null when all accounts have no tokens", () => {
     const tokenTracker = new TokenBucketTracker({ initialTokens: 0 });
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = selectHybridAccount(accounts, tokenTracker);
@@ -558,8 +558,8 @@ describe("selectHybridAccount", () => {
     const tokenTracker = new TokenBucketTracker({ initialTokens: 50 });
     
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 0, healthScore: 40, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 0, healthScore: 100, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 0, healthScore: 40, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 0, healthScore: 100, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     const result = selectHybridAccount(accounts, tokenTracker, 50);
@@ -569,9 +569,9 @@ describe("selectHybridAccount", () => {
   it("returns a valid account index", () => {
     const tokenTracker = new TokenBucketTracker();
     const accounts: AccountWithMetrics[] = [
-      { index: 0, lastUsed: 1000, healthScore: 70, isRateLimited: false, isCoolingDown: false },
-      { index: 1, lastUsed: 500, healthScore: 80, isRateLimited: false, isCoolingDown: false },
-      { index: 2, lastUsed: 2000, healthScore: 60, isRateLimited: false, isCoolingDown: false },
+      { index: 0, lastUsed: 1000, healthScore: 70, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 1, lastUsed: 500, healthScore: 80, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
+      { index: 2, lastUsed: 2000, healthScore: 60, isRateLimited: false, isCoolingDown: false, remainingQuotaFraction: 1 },
     ];
 
     for (let i = 0; i < 10; i++) {

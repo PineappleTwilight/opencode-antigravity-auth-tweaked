@@ -84,9 +84,13 @@ async function pollOperation(
   };
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout for polling
+    
     try {
       const response = await fetch(`${baseEndpoint}/v1/${operationName}`, {
         headers,
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -101,6 +105,8 @@ async function pollOperation(
     } catch (error) {
       log.debug("Error polling operation", { error: String(error), operationName });
       break;
+    } finally {
+      clearTimeout(timeoutId);
     }
     await wait(delayMs);
   }
@@ -209,6 +215,9 @@ export async function loadManagedProject(
   );
 
   for (const baseEndpoint of loadEndpoints) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout for load
+    
     try {
       const response = await fetch(
         `${baseEndpoint}/v1internal:loadCodeAssist`,
@@ -216,6 +225,7 @@ export async function loadManagedProject(
           method: "POST",
           headers: loadHeaders,
           body: JSON.stringify(requestBody),
+          signal: controller.signal,
         },
       );
 
@@ -227,6 +237,8 @@ export async function loadManagedProject(
     } catch (error) {
       log.debug("Failed to load managed project", { endpoint: baseEndpoint, error: String(error) });
       continue;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -267,6 +279,9 @@ export async function onboardManagedProject(
   };
 
   for (const baseEndpoint of endpoints) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout for onboard
+    
     try {
       log.debug("Attempting onboarding at endpoint", { baseEndpoint, useCliStyle });
       const response = await fetch(
@@ -275,6 +290,7 @@ export async function onboardManagedProject(
           method: "POST",
           headers,
           body: JSON.stringify(requestBody),
+          signal: controller.signal,
         },
       );
 
@@ -330,6 +346,8 @@ export async function onboardManagedProject(
     } catch (error) {
       log.debug("Failed to onboard managed project", { endpoint: baseEndpoint, error: String(error) });
       continue;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

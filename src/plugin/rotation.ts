@@ -201,6 +201,7 @@ export interface AccountWithMetrics {
   healthScore: number;
   isRateLimited: boolean;
   isCoolingDown: boolean;
+  remainingQuotaFraction: number;
 }
 
 /**
@@ -286,8 +287,9 @@ export function selectHybridAccount(
     .map(acc => {
       const baseScore = calculateHybridScore(acc, maxTokens);
       
-      // Apply stickiness bonus to current account (global stickiness)
-      const stickinessBonus = acc.index === currentAccountIndex ? STICKINESS_BONUS : 0;
+      // Scale stickiness bonus by health: healthier accounts are more "sticky"
+      const finalStickiness = STICKINESS_BONUS * (acc.healthScore / 100);
+      const stickinessBonus = acc.index === currentAccountIndex ? finalStickiness : 0;
       
       // Apply conversation stickiness bonus (preserves prompt cache)
       const sessionBonus = acc.index === lastAccountForSession ? CONVERSATION_STICKINESS_BONUS : 0;
@@ -311,8 +313,9 @@ export function selectHybridAccount(
   const sessionCandidate = scored.find(s => s.isSessionMatch);
   if (sessionCandidate && !best.isSessionMatch) {
     const advantage = best.baseScore - sessionCandidate.baseScore;
-    // Don't switch away from conversation-sticky account unless advantage is very high
-    if (advantage < (SWITCH_THRESHOLD + CONVERSATION_STICKINESS_BONUS)) {
+    // Overriding conversation stickiness (500 threshold)
+    // Don't switch away unless advantage is very high (over 500 points)
+    if (advantage < 500) {
       return sessionCandidate.index;
     }
   }
@@ -343,10 +346,13 @@ function calculateHybridScore(
   const secondsSinceUsed = (Date.now() - account.lastUsed) / 1000;
   const freshnessComponent = Math.min(secondsSinceUsed, 3600) * 0.1; // 0-360
   
+  // Daily quota health score (0-400)
+  const quotaScore = (account.remainingQuotaFraction ?? 1) * 400;
+
   // Penalty for each active request to distribute load during high concurrency
   const concurrencyPenalty = account.activeCount * CONCURRENCY_PENALTY;
   
-  return Math.max(0, healthComponent + tokenComponent + freshnessComponent - concurrencyPenalty);
+  return Math.max(0, healthComponent + tokenComponent + freshnessComponent + quotaScore - concurrencyPenalty);
 }
 
 // ============================================================================

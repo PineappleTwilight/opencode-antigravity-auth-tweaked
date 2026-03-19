@@ -9,6 +9,7 @@ import {
 import { DEFAULT_CONFIG } from "./config";
 import { initializeDebug } from "./debug";
 import { SKIP_THOUGHT_SIGNATURE } from "../constants";
+import { GEMINI_CLI_HEADERS } from "../generated/headers";
 import * as config from "./config";
 import type { SignatureStore, ThoughtBuffer, StreamingCallbacks, StreamingOptions } from "./core/streaming/types";
 
@@ -633,9 +634,9 @@ it("removes x-api-key header", () => {
         "gemini-cli"
       );
       const headers = result.init.headers as Headers;
-      expect(headers.get("User-Agent")).toBe("google-api-nodejs-client/9.15.1");
-      expect(headers.get("X-Goog-Api-Client")).toBe("google-cloud-sdk vscode_cloudshelleditor/0.1");
-      expect(headers.get("Client-Metadata")).toBe("ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI");
+      expect(headers.get("User-Agent")).toBe(GEMINI_CLI_HEADERS["User-Agent"]);
+      expect(headers.get("X-Goog-Api-Client")).toBe(GEMINI_CLI_HEADERS["X-Goog-Api-Client"]);
+      expect(headers.get("Client-Metadata")).toBe(GEMINI_CLI_HEADERS["Client-Metadata"]);
     });
 
     it("builds gemini-cli wrapped body without antigravity-only fields", () => {

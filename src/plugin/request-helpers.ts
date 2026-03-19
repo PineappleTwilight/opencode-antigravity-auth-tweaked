@@ -34,7 +34,7 @@ const UNSUPPORTED_CONSTRAINTS = [
 const UNSUPPORTED_KEYWORDS = [
   ...UNSUPPORTED_CONSTRAINTS,
   "$schema", "$defs", "definitions", "const", "$ref", "additionalProperties",
-  "propertyNames", "title", "$id", "$comment",
+  "propertyNames", "title", "$id", "$comment", "nullable",
 ] as const;
 
 /**
@@ -455,21 +455,27 @@ function flattenAnyOfOneOf(schema: any): any {
 
 /**
  * Phase 2c: Flattens type arrays to single type with nullable hint.
- * { type: ["string", "null"] } → { type: "string", description: "(nullable)" }
+ * Also recursively removes nullable fields from 'required' arrays.
  */
-function flattenTypeArrays(schema: any, nullableFields?: Map<string, string[]>, currentPath?: string): any {
+function flattenTypeArrays(schema: any): any {
   if (!schema || typeof schema !== "object") {
     return schema;
   }
 
   if (Array.isArray(schema)) {
-    return schema.map((item, idx) => flattenTypeArrays(item, nullableFields, `${currentPath || ""}[${idx}]`));
+    return schema.map((item) => flattenTypeArrays(item));
   }
 
   let result: any = { ...schema };
-  const localNullableFields = nullableFields || new Map<string, string[]>();
 
-  // Handle type array
+  // Handle OAS-style nullable: true
+  if (result.nullable === true) {
+    result = appendDescriptionHint(result, "nullable");
+    // We'll delete 'nullable' in Phase 3 (removeUnsupportedKeywords), 
+    // but we can also do it here for clarity.
+  }
+
+  // Handle JSON Schema type array (e.g. ["string", "null"])
   if (Array.isArray(result.type)) {
     const types = result.type as string[];
     const hasNull = types.includes("null");
@@ -493,40 +499,44 @@ function flattenTypeArrays(schema: any, nullableFields?: Map<string, string[]>, 
   // Recursively process properties
   if (result.properties && typeof result.properties === "object") {
     const newProps: any = {};
+    const nullablePropNames = new Set<string>();
+
     for (const [propKey, propValue] of Object.entries(result.properties)) {
-      const propPath = currentPath ? `${currentPath}.properties.${propKey}` : `properties.${propKey}`;
-      const processed = flattenTypeArrays(propValue, localNullableFields, propPath);
+      const processed = flattenTypeArrays(propValue);
       newProps[propKey] = processed;
 
-      // Track nullable fields for required array cleanup
-      if (processed && typeof processed === "object" && 
-          typeof processed.description === "string" && 
-          processed.description.includes("nullable")) {
-        const objectPath = currentPath || "";
-        const existing = localNullableFields.get(objectPath) || [];
-        existing.push(propKey);
-        localNullableFields.set(objectPath, existing);
+      // Track if this property is nullable (either via hint or explicit flag)
+      if (processed && typeof processed === "object") {
+        const isNullable = 
+          (typeof processed.description === "string" && 
+           (processed.description.includes("nullable") || processed.description.includes("(nullable)"))) ||
+          processed.nullable === true ||
+          (Array.isArray(processed.type) && processed.type.includes("null"));
+        
+        if (isNullable) {
+          nullablePropNames.add(propKey);
+        }
       }
     }
     result.properties = newProps;
-  }
 
-  // Remove nullable fields from required array
-  if (Array.isArray(result.required) && !nullableFields) {
-    // Only at root level, filter out nullable fields
-    const nullableAtRoot = localNullableFields.get("") || [];
-    if (nullableAtRoot.length > 0) {
-      result.required = result.required.filter((r: string) => !nullableAtRoot.includes(r));
-      if (result.required.length === 0) {
+    // Remove nullable fields from this object's required array
+    if (Array.isArray(result.required) && nullablePropNames.size > 0) {
+      const originalRequired = result.required as string[];
+      const filteredRequired = originalRequired.filter(name => !nullablePropNames.has(name));
+      
+      if (filteredRequired.length === 0) {
         delete result.required;
+      } else {
+        result.required = filteredRequired;
       }
     }
   }
 
-  // Recursively process other nested objects
-  for (const [key, value] of Object.entries(result)) {
-    if (key !== "properties" && typeof value === "object" && value !== null) {
-      result[key] = flattenTypeArrays(value, localNullableFields, `${currentPath || ""}.${key}`);
+  // Recursively process items (for arrays) and other schema-bearing fields
+  for (const key of ["items", "additionalProperties", "not"]) {
+    if (result[key] && typeof result[key] === "object") {
+      result[key] = flattenTypeArrays(result[key]);
     }
   }
 
@@ -999,6 +1009,7 @@ function isOurCachedSignature(
   const cachedSignature = getCachedSignatureFn(sessionId, text);
   return cachedSignature === partSignature;
 }
+
 
 /**
  * Gets the text content from a thinking part.
@@ -1576,24 +1587,20 @@ export function normalizeThinkingConfig(config: unknown): ThinkingConfig | undef
  * Parses an Antigravity API body; handles array-wrapped responses the API sometimes returns.
  */
 export function parseAntigravityApiBody(rawText: string): AntigravityApiBody | null {
-  try {
-    const parsed = JSON.parse(rawText);
-    if (Array.isArray(parsed)) {
-      const firstObject = parsed.find((item: unknown) => typeof item === "object" && item !== null);
-      if (firstObject && typeof firstObject === "object") {
-        return firstObject as AntigravityApiBody;
-      }
-      return null;
+  const parsed = safeJsonParse<any>(rawText, null);
+  if (Array.isArray(parsed)) {
+    const firstObject = parsed.find((item: unknown) => typeof item === "object" && item !== null);
+    if (firstObject && typeof firstObject === "object") {
+      return firstObject as AntigravityApiBody;
     }
-
-    if (parsed && typeof parsed === "object") {
-      return parsed as AntigravityApiBody;
-    }
-
-    return null;
-  } catch {
     return null;
   }
+
+  if (parsed && typeof parsed === "object") {
+    return parsed as AntigravityApiBody;
+  }
+
+  return null;
 }
 
 /**
@@ -1634,16 +1641,12 @@ export function extractUsageFromSsePayload(payload: string): AntigravityUsageMet
     if (!jsonText) {
       continue;
     }
-    try {
-      const parsed = JSON.parse(jsonText);
-      if (parsed && typeof parsed === "object") {
-        const usage = extractUsageMetadata({ response: (parsed as Record<string, unknown>).response });
-        if (usage) {
-          return usage;
-        }
+    const parsed = safeJsonParse<any>(jsonText, null);
+    if (parsed && typeof parsed === "object") {
+      const usage = extractUsageMetadata({ response: (parsed as Record<string, unknown>).response });
+      if (usage) {
+        return usage;
       }
-    } catch {
-      continue;
     }
   }
   return null;
@@ -1723,83 +1726,82 @@ export function isEmptyResponseBody(text: string): boolean {
     return true;
   }
 
-  try {
-    const parsed = JSON.parse(text);
-    
-    // Check for empty candidates (Gemini/Antigravity format)
-    if (parsed.candidates !== undefined) {
-      if (!Array.isArray(parsed.candidates) || parsed.candidates.length === 0) {
-        return true;
-      }
-      
-      // Check if first candidate has empty content
-      const firstCandidate = parsed.candidates[0];
-      if (!firstCandidate) {
-        return true;
-      }
-      
-      // Check for empty parts in content
-      const content = firstCandidate.content;
-      if (!content || typeof content !== "object") {
-        return true;
-      }
-      
-      const parts = content.parts;
-      if (!Array.isArray(parts) || parts.length === 0) {
-        return true;
-      }
-      
-      // Check if all parts are empty (no text, no functionCall)
-      const hasContent = parts.some((part: any) => {
-        if (!part || typeof part !== "object") return false;
-        if (typeof part.text === "string" && part.text.length > 0) return true;
-        if (part.functionCall) return true;
-        if (part.thought === true && typeof part.text === "string") return true;
-        return false;
-      });
-      
-      if (!hasContent) {
-        return true;
-      }
-    }
-    
-    // Check for empty choices (OpenAI format - shouldn't occur but handle it)
-    if (parsed.choices !== undefined) {
-      if (!Array.isArray(parsed.choices) || parsed.choices.length === 0) {
-        return true;
-      }
-      
-      const firstChoice = parsed.choices[0];
-      if (!firstChoice) {
-        return true;
-      }
-      
-      // Check for empty message/delta
-      const message = firstChoice.message || firstChoice.delta;
-      if (!message) {
-        return true;
-      }
-      
-      // Check if message has content or tool_calls
-      if (!message.content && !message.tool_calls && !message.reasoning_content) {
-        return true;
-      }
-    }
-    
-    // Check response wrapper (Antigravity envelope)
-    if (parsed.response !== undefined) {
-      const response = parsed.response;
-      if (!response || typeof response !== "object") {
-        return true;
-      }
-      return isEmptyResponseBody(JSON.stringify(response));
-    }
-    
-    return false;
-  } catch {
+  const parsed = safeJsonParse<any>(text, null);
+  if (parsed === null) {
     // JSON parse error - treat as empty
     return true;
   }
+  
+  // Check for empty candidates (Gemini/Antigravity format)
+  if (parsed.candidates !== undefined) {
+    if (!Array.isArray(parsed.candidates) || parsed.candidates.length === 0) {
+      return true;
+    }
+    
+    // Check if first candidate has empty content
+    const firstCandidate = parsed.candidates[0];
+    if (!firstCandidate) {
+      return true;
+    }
+    
+    // Check for empty parts in content
+    const content = firstCandidate.content;
+    if (!content || typeof content !== "object") {
+      return true;
+    }
+    
+    const parts = content.parts;
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return true;
+    }
+    
+    // Check if all parts are empty (no text, no functionCall)
+    const hasContent = parts.some((part: any) => {
+      if (!part || typeof part !== "object") return false;
+      if (typeof part.text === "string" && part.text.length > 0) return true;
+      if (part.functionCall) return true;
+      if (part.thought === true && typeof part.text === "string") return true;
+      return false;
+    });
+    
+    if (!hasContent) {
+      return true;
+    }
+  }
+  
+  // Check for empty choices (OpenAI format - shouldn't occur but handle it)
+  if (parsed.choices !== undefined) {
+    if (!Array.isArray(parsed.choices) || parsed.choices.length === 0) {
+      return true;
+    }
+    
+    const firstChoice = parsed.choices[0];
+    if (!firstChoice) {
+      return true;
+    }
+    
+    // Check for empty message/delta
+    const message = firstChoice.message || firstChoice.delta;
+    if (!message) {
+      return true;
+    }
+    
+    // Check if message has content or tool_calls
+    if (!message.content && !message.tool_calls && !message.reasoning_content) {
+      return true;
+    }
+  }
+  
+  // Check response wrapper (Antigravity envelope)
+  if (parsed.response !== undefined) {
+    const response = parsed.response;
+    if (!response || typeof response !== "object") {
+      return true;
+    }
+    return isEmptyResponseBody(JSON.stringify(response));
+  }
+  
+  return false;
 }
 
 /**
@@ -1839,44 +1841,51 @@ export function isMeaningfulSseLine(line: string): boolean {
 
   const data = line.slice(6).trim();
   
-  if (data === "[DONE]") {
+  if (data === "[DONE]" || !data) {
     return false;
   }
 
-  if (!data) {
+  const parsed = safeJsonParse<any>(data, null);
+  if (parsed === null) {
     return false;
   }
-
-  try {
-    const parsed = JSON.parse(data);
-    
-    // Check for candidates with content
-    if (parsed.candidates && Array.isArray(parsed.candidates)) {
-      for (const candidate of parsed.candidates) {
-        const parts = candidate?.content?.parts;
-        if (Array.isArray(parts) && parts.length > 0) {
-          for (const part of parts) {
-            if (typeof part?.text === "string" && part.text.length > 0) return true;
-            if (part?.functionCall) return true;
-          }
+  
+  // Check for candidates with content
+  if (parsed.candidates && Array.isArray(parsed.candidates)) {
+    for (const candidate of parsed.candidates) {
+      const parts = candidate?.content?.parts;
+      if (Array.isArray(parts)) {
+        for (const part of parts) {
+          if (typeof part?.text === "string" && part.text.length > 0) return true;
+          if (part?.functionCall) return true;
         }
       }
     }
-    
-    // Check response wrapper
-    if (parsed.response?.candidates) {
-      return isMeaningfulSseLine(`data: ${JSON.stringify(parsed.response)}`);
-    }
-    
-    return false;
-  } catch {
-    return false;
   }
+  
+  // Check response wrapper
+  if (parsed.response?.candidates) {
+    return isMeaningfulSseLine(`data: ${JSON.stringify(parsed.response)}`);
+  }
+  
+  return false;
 }
 
 // ============================================================================
 // RECURSIVE JSON STRING AUTO-PARSING (Ported from LLM-API-Key-Proxy)
 // ============================================================================
+
+/**
+ * Safely parses a JSON string, returning a fallback value if parsing fails.
+ */
+export function safeJsonParse<T>(json: string | undefined | null, fallback: T): T {
+  if (!json) return fallback;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return fallback;
+  }
+}
 
 /**
  * Recursively parses JSON strings in nested data structures.
@@ -1960,11 +1969,9 @@ export function recursivelyParseJsonStrings(
   const hasIntentionalEscapes = obj.includes('\\"') || obj.includes("\\\\");
 
   if (hasControlCharEscapes && !hasIntentionalEscapes) {
-    try {
-      // Use JSON.parse with quotes to unescape the string
-      return JSON.parse(`"${obj}"`);
-    } catch {
-      // Continue with original processing
+    const unescaped = safeJsonParse(`"${obj}"`, null);
+    if (unescaped !== null) {
+      return unescaped;
     }
   }
 
@@ -1975,45 +1982,39 @@ export function recursivelyParseJsonStrings(
       (stripped.startsWith("{") && stripped.endsWith("}")) ||
       (stripped.startsWith("[") && stripped.endsWith("]"))
     ) {
-      try {
-        const parsed = JSON.parse(obj);
+      const parsed = safeJsonParse(obj, null);
+      if (parsed !== null) {
         return recursivelyParseJsonStrings(parsed);
-      } catch {
-        // Continue
       }
     }
 
     // Handle malformed JSON: array that doesn't end with ]
     if (stripped.startsWith("[") && !stripped.endsWith("]")) {
-      try {
-        const lastBracket = stripped.lastIndexOf("]");
-        if (lastBracket > 0) {
-          const cleaned = stripped.slice(0, lastBracket + 1);
-          const parsed = JSON.parse(cleaned);
+      const lastBracket = stripped.lastIndexOf("]");
+      if (lastBracket > 0) {
+        const cleaned = stripped.slice(0, lastBracket + 1);
+        const parsed = safeJsonParse(cleaned, null);
+        if (parsed !== null) {
           log.debug("Auto-corrected malformed JSON array", {
             truncatedChars: stripped.length - cleaned.length,
           });
           return recursivelyParseJsonStrings(parsed);
         }
-      } catch {
-        // Continue
       }
     }
 
     // Handle malformed JSON: object that doesn't end with }
     if (stripped.startsWith("{") && !stripped.endsWith("}")) {
-      try {
-        const lastBrace = stripped.lastIndexOf("}");
-        if (lastBrace > 0) {
-          const cleaned = stripped.slice(0, lastBrace + 1);
-          const parsed = JSON.parse(cleaned);
+      const lastBrace = stripped.lastIndexOf("}");
+      if (lastBrace > 0) {
+        const cleaned = stripped.slice(0, lastBrace + 1);
+        const parsed = safeJsonParse(cleaned, null);
+        if (parsed !== null) {
           log.debug("Auto-corrected malformed JSON object", {
             truncatedChars: stripped.length - cleaned.length,
           });
           return recursivelyParseJsonStrings(parsed);
         }
-      } catch {
-        // Continue
       }
     }
   }
