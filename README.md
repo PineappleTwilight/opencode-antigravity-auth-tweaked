@@ -108,9 +108,8 @@ For solutions to common issues (auth problems, 403 errors, MCP server conflicts,
 
 ## Credits
 
-- [opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth) by [@noefabris](https://github.com/noefabris)
--
-
+- [opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth) by [@NoeFabris](https://github.com/noefabris)
+- [Gemini CLI](https://github.com/google-gemini/gemini-cli) by [@google-gemini](https://github.com/google-gemini)
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
