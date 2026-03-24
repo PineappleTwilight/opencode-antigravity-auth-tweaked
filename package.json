@@ -1,6 +1,6 @@
 {
     "name": "opencode-antigravity-auth-tweaked",
-    "version": "1.9.5",
+    "version": "1.9.6",
     "description": "Google Antigravity IDE OAuth auth plugin for Opencode",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
