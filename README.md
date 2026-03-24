@@ -108,8 +108,8 @@ For solutions to common issues (auth problems, 403 errors, MCP server conflicts,
 
 ## Credits
 
-- [opencode-gemini-auth](https://github.com/jenslys/opencode-gemini-auth) by [@jenslys](https://github.com/jenslys)
-- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+- [opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth) by [@noefabris](https://github.com/noefabris)
+-
 
 ## License
 
