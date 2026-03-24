@@ -42,7 +42,7 @@ Enable Opencode to authenticate against **Antigravity** (Google's IDE) via OAuth
 
     ```json
     {
-      "plugin": ["opencode-antigravity-auth@latest"]
+      "plugin": ["opencode-antigravity-auth-tweaked@latest"]
     }
     ```
 
@@ -103,14 +103,6 @@ For solutions to common issues (auth problems, 403 errors, MCP server conflicts,
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — Common issues and fixes
 - [Architecture](docs/ARCHITECTURE.md) — How the plugin works
 - [API Spec](docs/ANTIGRAVITY_API_SPEC.md) — Antigravity API reference
-
----
-
-## Support
-
-If this plugin helps you, consider supporting its maintenance:
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/S6S81QBOIR)
 
 ---
 
